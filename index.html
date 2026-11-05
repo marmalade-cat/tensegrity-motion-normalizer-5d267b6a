@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Tensegrity Motion Normalizer — Prototype</title>
+  <style>
+    body{font-family:sans-serif;max-width:820px;margin:24px}
+    textarea{width:100%;height:160px;font-family:monospace}
+    pre{background:#f6f6f6;padding:8px}
+    label{display:block;margin-top:8px}
+    button{margin-right:8px}
+  </style>
+</head>
+<body>
+  <h2>Tensegrity Motion Normalizer (prototype)</h2>
+  <p>Paste CSV or JSON pose time-series (simple per-row timestamps + per-module pose columns). This prototype detects and normalizes basic formats and resamples to regular timesteps.</p>
+
+  <label>Input data (CSV or JSON):</label>
+  <textarea id="input"></textarea>
+  <label>Regular timestep (seconds): <input id="dt" type="number" value="0.02" step="0.01"></label>
+  <div style="margin-top:8px">
+    <button id="detect">Detect</button>
+    <button id="normalize">Normalize</button>
+    <button id="exportCSV">Export CSV</button>
+    <button id="exportJSON">Export JSON</button>
+  </div>
+
+  <h3>Detected</h3>
+  <pre id="detected">(none)</pre>
+
+  <h3>Output</h3>
+  <textarea id="output"></textarea>
+
+<script>
+// Minimal detectors and normalizer
+function tryParseJSON(s){ try{return JSON.parse(s)}catch(e){return null}}
+function parseCSV(text){ const lines = text.trim().split(/\r?\n/).filter(Boolean); if(lines.length===0) return null; const hdr = lines[0].split(/,|\t/).map(h=>h.trim()); const rows = lines.slice(1).map(l=>l.split(/,|\t/).map(c=>c.trim())); return rows.map(r=>{ const obj={}; hdr.forEach((h,i)=>obj[h]=r[i]===undefined?"":r[i]); return obj; }); }
+
+function detectFormat(data){ // data: array of objects or array of arrays? unify to array of objects
+  let rows = data;
+  if(!Array.isArray(rows)) return {ok:false,reason:'not-array'};
+  if(rows.length===0) return {ok:false,reason:'empty'};
+  const keys = Object.keys(rows[0]);
+  // find timestamp-like column
+  const tsCandidates = keys.filter(k=>/time|t|timestamp|date/i.test(k));
+  let tsKey = tsCandidates[0]||keys[0];
+  // sample numeric columns
+  const sample = rows[0];
+  const numericKeys = keys.filter(k=>!isNaN(parseFloat(sample[k])));
+  // detect quaternion (4 consecutive fields with w/x/y/z or q..)
+  const qkeys = keys.filter(k=>/q[0-3]|qw|qx|qy|qz|quat/i.test(k));
+  const eulerKeys = keys.filter(k=>/roll|pitch|yaw|rx|ry|rz|euler/i.test(k));
+  const xyzKeys = keys.filter(k=>/x\b|y\b|z\b|pos/i.test(k));
+  return {ok:true,keys,tsKey,numericKeys,qkeys,eulerKeys,xyzKeys};
+}
+
+function rowsToTimeSeries(rows,det){ const tkey = det.tsKey; return rows.map(r=>{ const t = parseFloat(r[tkey]); return {t:isNaN(t)?null:t,raw:r}; }); }
+
+function normalize(series,det,dt){ // simple nearest-neighbor resample, unify output columns
+  // build list of output columns: time + all numeric keys
+  const cols = ['t'].concat(det.numericKeys); const tvals = series.map(s=>s.t).filter(t=>t!==null).sort((a,b)=>a-b);
+  if(tvals.length===0) throw 'no timestamps';
+  const t0 = tvals[0], t1 = tvals[tvals.length-1];
+  const n = Math.ceil((t1-t0)/dt)+1; const out = [];
+  for(let i=0;i<n;i++){ const tt = +(t0 + i*dt).toFixed(6);
+    // find nearest index
+    let best=null,bd=1e12; for(const row of series){ if(row.t===null) continue; const d=Math.abs(row.t-tt); if(d<bd){bd=d;best=row;} }
+    const outRow = {t:tt}; for(const k of det.numericKeys){ outRow[k]=best?parseFloat(best.raw[k]||0):0 }
+    out.push(outRow);
+  }
+  return {cols,rows:out};
+}
+
+function toCSV(norm){ const cols = norm.cols; const lines=[cols.join(',')]; for(const r of norm.rows){ lines.push(cols.map(c=>r[c]).join(',')); } return lines.join('\n'); }
+
+// UI
+const input = document.getElementById('input'); const detected = document.getElementById('detected'); const output = document.getElementById('output');
+let lastRows=null, lastDet=null, lastNorm=null;
+
+document.getElementById('detect').onclick = ()=>{
+  const s = input.value.trim(); if(!s){ detected.textContent='(no input)'; return; }
+  const j = tryParseJSON(s);
+  if(j){ if(Array.isArray(j)) lastRows=j; else { detected.textContent='JSON root not array'; return; } }
+  else { const csv = parseCSV(s); if(!csv){ detected.textContent='Unknown format'; return; } lastRows=csv; }
+  lastDet = detectFormat(lastRows);
+  detected.textContent = JSON.stringify(lastDet,null,2);
+}
+
+document.getElementById('normalize').onclick = ()=>{
+  if(!lastRows || !lastDet){ detected.textContent='Run Detect first'; return; }
+  const dt = parseFloat(document.getElementById('dt').value)||0.02;
+  const series = rowsToTimeSeries(lastRows,lastDet);
+  try{ lastNorm = normalize(series,lastDet,dt); output.value = JSON.stringify(lastNorm.rows.slice(0,200),null,2); }
+  catch(e){ output.value = 'Error: '+e }
+}
+
+document.getElementById('exportCSV').onclick = ()=>{
+  if(!lastNorm){ output.value='Run Normalize first'; return; }
+  output.value = toCSV(lastNorm);
+}
+
+document.getElementById('exportJSON').onclick = ()=>{
+  if(!lastNorm){ output.value='Run Normalize first'; return; }
+  output.value = JSON.stringify({cols:lastNorm.cols,rows:lastNorm.rows},null,2);
+}
+</script>
+</body>
+</html>
